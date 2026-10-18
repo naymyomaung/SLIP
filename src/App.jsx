@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   Clock3,
+  Edit2,
   FileText,
   FileSpreadsheet,
   Grid2X2,
@@ -35,7 +36,12 @@ function loadSavedData() {
     const parsed = JSON.parse(stored);
     return {
       products: Array.isArray(parsed.products)
-        ? parsed.products.filter((product) => !DEFAULT_PRODUCT_IDS.has(product.id))
+        ? parsed.products
+          .filter((product) => !DEFAULT_PRODUCT_IDS.has(product.id))
+          .map((product) => ({
+            ...product,
+            stockQuantity: Number(product.stockQuantity ?? product.quantity ?? 0),
+          }))
         : [],
       sales: Array.isArray(parsed.sales) ? parsed.sales : [],
     };
@@ -127,6 +133,7 @@ function App() {
   const [query, setQuery] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [showProductForm, setShowProductForm] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
   const [showCheckout, setShowCheckout] = useState(false);
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [selectedSale, setSelectedSale] = useState(null);
@@ -174,6 +181,12 @@ function App() {
   }, [savedData.sales, historyQuery]);
 
   function addToCart(product) {
+    const stockQuantity = Number(product.stockQuantity || 0);
+    const cartQuantity = cart.find((item) => item.id === product.id)?.quantity || 0;
+    if (cartQuantity >= stockQuantity) {
+      setNotice(stockQuantity > 0 ? `Only ${stockQuantity} ${product.name} in stock.` : `${product.name} is out of stock.`);
+      return;
+    }
     setCart((current) => {
       const existing = current.find((item) => item.id === product.id);
       if (existing) {
@@ -186,6 +199,14 @@ function App() {
   }
 
   function changeQuantity(productId, amount) {
+    if (amount > 0) {
+      const product = savedData.products.find((item) => item.id === productId);
+      const cartQuantity = cart.find((item) => item.id === productId)?.quantity || 0;
+      if (product && cartQuantity >= Number(product.stockQuantity || 0)) {
+        setNotice(`Only ${product.stockQuantity} ${product.name} in stock.`);
+        return;
+      }
+    }
     setCart((current) =>
       current
         .map((item) =>
@@ -197,14 +218,31 @@ function App() {
 
   function completeSale() {
     if (!cart.length) return;
+    const unavailableItem = cart.find((cartItem) => {
+      const product = savedData.products.find((item) => item.id === cartItem.id);
+      return !product || Number(product.stockQuantity || 0) < cartItem.quantity;
+    });
+    if (unavailableItem) {
+      setNotice(`Not enough ${unavailableItem.name} in stock to complete this sale.`);
+      return;
+    }
     const sale = {
       id: `SL-${Date.now().toString().slice(-8)}`,
       date: new Date().toISOString(),
       customerName: customerName.trim(),
       items: cart.map(({ id, name, price, quantity }) => ({ id, name, price, quantity })),
       total: subtotal,
+      stockAdjusted: true,
     };
-    setSavedData((current) => ({ ...current, sales: [...current.sales, sale] }));
+    setSavedData((current) => ({
+      products: current.products.map((product) => {
+        const soldItem = sale.items.find((item) => item.id === product.id);
+        return soldItem
+          ? { ...product, stockQuantity: Number(product.stockQuantity || 0) - soldItem.quantity }
+          : product;
+      }),
+      sales: [...current.sales, sale],
+    }));
     setCart([]);
     setCustomerName('');
     setShowCheckout(false);
@@ -217,7 +255,14 @@ function App() {
     const confirmed = window.confirm(`Delete receipt ${sale.id}? This cannot be undone.`);
     if (!confirmed) return;
     setSavedData((current) => ({
-      ...current,
+      products: sale.stockAdjusted
+        ? current.products.map((product) => {
+          const returnedItem = sale.items.find((item) => item.id === product.id);
+          return returnedItem
+            ? { ...product, stockQuantity: Number(product.stockQuantity || 0) + Number(returnedItem.quantity || 0) }
+            : product;
+        })
+        : current.products,
       sales: current.sales.filter((savedSale) => savedSale.id !== sale.id),
     }));
     if (selectedSale?.id === sale.id) setSelectedSale(null);
@@ -228,17 +273,24 @@ function App() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const product = {
-      id: `p-${crypto.randomUUID()}`,
+      id: editingProduct?.id || `p-${crypto.randomUUID()}`,
       name: String(form.get('name')).trim(),
       category: String(form.get('category')).trim(),
       price: Number(form.get('price')),
       emoji: String(form.get('emoji') || '🛍️').trim(),
+      stockQuantity: Math.floor(Number(form.get('stockQuantity'))),
       color: 'mint',
     };
-    if (!product.name || !product.category || product.price <= 0) return;
-    setSavedData((current) => ({ ...current, products: [...current.products, product] }));
+    if (!product.name || !product.category || product.price <= 0 || !Number.isFinite(product.stockQuantity) || product.stockQuantity < 0) return;
+    setSavedData((current) => ({
+      ...current,
+      products: editingProduct
+        ? current.products.map((savedProduct) => savedProduct.id === product.id ? { ...savedProduct, ...product } : savedProduct)
+        : [...current.products, product],
+    }));
     setShowProductForm(false);
-    setNotice(`${product.name} added to your items.`);
+    setNotice(editingProduct ? `${product.name} updated.` : `${product.name} added to your items.`);
+    setEditingProduct(null);
   }
 
   function exportBackup() {
@@ -497,7 +549,13 @@ function App() {
       if (!Array.isArray(parsed.products) || !Array.isArray(parsed.sales)) {
         throw new Error('The selected file is not a valid Slip backup.');
       }
-      setSavedData({ products: parsed.products, sales: parsed.sales });
+      setSavedData({
+        products: parsed.products.map((product) => ({
+          ...product,
+          stockQuantity: Number(product.stockQuantity ?? product.quantity ?? 0),
+        })),
+        sales: parsed.sales,
+      });
       setCart([]);
       setNotice(`Backup restored from ${file.name}.`);
     } catch (error) {
@@ -568,7 +626,7 @@ function App() {
                     <h1 className="mt-1 text-[26px] font-bold tracking-tight sm:text-3xl">Good afternoon <span aria-hidden="true">✦</span></h1>
                     <p className="mt-1 text-sm text-slate-500">What would you like to add to the order?</p>
                   </div>
-                  <button className="secondary-button" onClick={() => setShowProductForm(true)}><Plus size={16} /> Add item</button>
+                  <button className="secondary-button" onClick={() => { setEditingProduct(null); setShowProductForm(true); }}><Plus size={16} /> Add item</button>
                 </div>
 
                 <div className="mb-5 flex flex-col gap-3 sm:flex-row">
@@ -589,21 +647,51 @@ function App() {
 
                 {filteredProducts.length ? (
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-                    {filteredProducts.map((product) => (
-                      <button key={product.id} className="product-card text-left" onClick={() => addToCart(product)}>
-                        <div className={`product-art art-${product.color || 'mint'}`}><span>{product.emoji || '🛍️'}</span><span className="add-product"><Plus size={15} /></span></div>
-                        <div className="px-3.5 pb-3.5 pt-3">
-                          <p className="truncate text-sm font-semibold">{product.name}</p>
-                          <div className="mt-1.5 flex items-center justify-between gap-2">
-                            <span className="text-xs text-slate-500">{product.category}</span>
-                            <span className="whitespace-nowrap text-xs font-bold text-slate-800">{formatMoney(product.price)}</span>
+                    {filteredProducts.map((product) => {
+                      const stockQuantity = Number(product.stockQuantity || 0);
+                      const cartQuantity = cart.find((item) => item.id === product.id)?.quantity || 0;
+                      return (
+                        <div key={product.id} className="product-card relative">
+                          <button
+                            className="w-full text-left disabled:cursor-not-allowed"
+                            onClick={() => addToCart(product)}
+                            disabled={cartQuantity >= stockQuantity}
+                            aria-label={`${product.name}, ${stockQuantity} in stock, ${formatMoney(product.price)}`}
+                          >
+                            <div className={`product-art art-${product.color || 'mint'}`}><span>{product.emoji || '🛍️'}</span><span className="add-product"><Plus size={15} /></span></div>
+                            <div className="px-3.5 pb-2 pt-3">
+                              <p className="truncate text-sm font-semibold">{product.name}</p>
+                              <div className="mt-1.5 flex items-center justify-between gap-2">
+                                <span className="truncate text-xs text-slate-500">{product.category}</span>
+                                <span className="whitespace-nowrap text-xs font-bold text-slate-800">{formatMoney(product.price)}</span>
+                              </div>
+                              <p className={`mt-2 text-[11px] font-semibold ${stockQuantity === 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                                Stock: {stockQuantity}
+                              </p>
+                            </div>
+                          </button>
+                          {stockQuantity === 0 && (
+                            <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-white/45 px-3 text-center backdrop-blur-sm">
+                              <span className="max-w-full truncate text-sm font-bold text-slate-900">{product.name}</span>
+                              <span className="rounded-full bg-rose-600 px-4 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm">
+                                Out of stock
+                              </span>
+                            </div>
+                          )}
+                          <div className="relative z-20 flex justify-end px-3.5 pb-3">
+                            <button
+                              className="icon-button h-8 w-8"
+                              onClick={() => { setEditingProduct(product); setShowProductForm(true); }}
+                              aria-label={`Edit ${product.name} and quantity`}
+                              title="Edit item and quantity"
+                            ><Edit2 size={14} /></button>
                           </div>
                         </div>
-                      </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="empty-panel"><Search size={22} /><p className="mt-2 font-semibold">No items found</p><p className="mt-1 text-sm">Try another search or add a new item.</p><button className="secondary-button mt-4" onClick={() => setShowProductForm(true)}><Plus size={15} /> Add item</button></div>
+                  <div className="empty-panel"><Search size={22} /><p className="mt-2 font-semibold">No items found</p><p className="mt-1 text-sm">Try another search or add a new item.</p><button className="secondary-button mt-4" onClick={() => { setEditingProduct(null); setShowProductForm(true); }}><Plus size={15} /> Add item</button></div>
                 )}
               </section>
 
@@ -732,15 +820,18 @@ function App() {
       )}
 
       {showProductForm && (
-        <Modal onClose={() => setShowProductForm(false)} title="Add an item" subtitle="Add a product or service to your catalog.">
-          <form onSubmit={addProduct} className="space-y-4">
-            <FormField label="Item name"><input name="name" required maxLength="60" placeholder="e.g. Iced latte" /></FormField>
+        <Modal onClose={() => { setShowProductForm(false); setEditingProduct(null); }} title={editingProduct ? 'Edit item' : 'Add an item'} subtitle={editingProduct ? 'Update item details or adjust its available quantity.' : 'Add a product or service to your catalog.'}>
+          <form key={editingProduct?.id || 'new-item'} onSubmit={addProduct} className="space-y-4">
+            <FormField label="Item name"><input name="name" required maxLength="60" defaultValue={editingProduct?.name || ''} placeholder="e.g. Iced latte" /></FormField>
             <div className="grid grid-cols-2 gap-3">
-              <FormField label="Category"><input name="category" required maxLength="30" placeholder="e.g. Drinks" /></FormField>
-              <FormField label={`Price (${CURRENCY})`}><input name="price" required type="number" min="1" step="1" placeholder="2500" /></FormField>
+              <FormField label="Category"><input name="category" required maxLength="30" defaultValue={editingProduct?.category || ''} placeholder="e.g. Drinks" /></FormField>
+              <FormField label={`Price (${CURRENCY})`}><input name="price" required type="number" min="1" step="1" defaultValue={editingProduct?.price || ''} placeholder="2500" /></FormField>
             </div>
-            <FormField label="Emoji (optional)"><input name="emoji" maxLength="4" placeholder="🛍️" /></FormField>
-            <button type="submit" className="primary-button mt-2 w-full justify-center"><Plus size={16} /> Add to catalog</button>
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Quantity in stock"><input name="stockQuantity" required type="number" min="0" step="1" defaultValue={editingProduct?.stockQuantity ?? editingProduct?.quantity ?? 0} /></FormField>
+              <FormField label="Emoji (optional)"><input name="emoji" maxLength="4" defaultValue={editingProduct?.emoji || ''} placeholder="🛍️" /></FormField>
+            </div>
+            <button type="submit" className="primary-button mt-2 w-full justify-center">{editingProduct ? <Check size={16} /> : <Plus size={16} />} {editingProduct ? 'Save changes' : 'Add to catalog'}</button>
           </form>
         </Modal>
       )}
