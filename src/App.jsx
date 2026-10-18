@@ -364,7 +364,7 @@ function App() {
       const nameWidth = 340;
       const textMeasure = document.createElement('canvas').getContext('2d');
       if (!textMeasure) throw new Error('Image export is not supported by this browser.');
-      textMeasure.font = '18px "Courier New", monospace';
+      textMeasure.font = '700 19px "Courier New", monospace';
       const itemLines = items.map((item) => wrapCanvasText(textMeasure, item.name, nameWidth));
       const height = 430 + itemLines.reduce((total, lines) => total + Math.max(1, lines.length) * 24 + 52, 0);
       const canvas = document.createElement('canvas');
@@ -379,14 +379,14 @@ function App() {
       context.fillStyle = '#14221a';
       context.font = '800 46px Arial, sans-serif';
       context.fillText('slip.', width / 2, 76);
-      context.fillStyle = '#66736b';
-      context.font = '16px Arial, sans-serif';
+      context.fillStyle = '#34443a';
+      context.font = '600 17px Arial, sans-serif';
       context.fillText('Thanks for stopping by!', width / 2, 108);
       drawReceiptRule(context, 136, width);
 
       context.textAlign = 'left';
-      context.fillStyle = '#5b665f';
-      context.font = '16px "Courier New", monospace';
+      context.fillStyle = '#26362c';
+      context.font = '700 17px "Courier New", monospace';
       let y = 172;
       const metadata = [
         ['Receipt', sale.id],
@@ -394,9 +394,11 @@ function App() {
         ...(sale.customerName ? [['Customer', sale.customerName]] : []),
       ];
       metadata.forEach(([label, value]) => {
-        context.fillStyle = '#66736b';
+        context.fillStyle = '#26362c';
+        context.font = '700 17px "Courier New", monospace';
         context.fillText(label, 48, y);
         context.fillStyle = '#17201c';
+        context.font = '700 17px "Courier New", monospace';
         context.textAlign = 'right';
         context.fillText(String(value), width - 48, y);
         context.textAlign = 'left';
@@ -409,14 +411,14 @@ function App() {
       items.forEach((item, index) => {
         const lines = itemLines[index];
         context.fillStyle = '#17201c';
-        context.font = '18px "Courier New", monospace';
+        context.font = '700 19px "Courier New", monospace';
         lines.forEach((line) => {
           context.textAlign = 'left';
           context.fillText(line, 48, y);
           y += 24;
         });
-        context.fillStyle = '#66736b';
-        context.font = '15px "Courier New", monospace';
+        context.fillStyle = '#26362c';
+        context.font = '700 16px "Courier New", monospace';
         context.textAlign = 'left';
         context.fillText(`${item.quantity} × ${formatMoney(item.price)}`, 48, y);
         context.fillStyle = '#17201c';
@@ -431,8 +433,8 @@ function App() {
 
       drawReceiptRule(context, y, width);
       y += 34;
-      context.fillStyle = '#66736b';
-      context.font = '17px "Courier New", monospace';
+      context.fillStyle = '#26362c';
+      context.font = '700 18px "Courier New", monospace';
       context.textAlign = 'left';
       context.fillText('Subtotal', 48, y);
       context.textAlign = 'right';
@@ -446,8 +448,8 @@ function App() {
       context.fillText(formatMoney(sale.total), width - 48, y);
       y += 45;
       context.textAlign = 'center';
-      context.fillStyle = '#66736b';
-      context.font = '16px Arial, sans-serif';
+      context.fillStyle = '#34443a';
+      context.font = '600 17px Arial, sans-serif';
       context.fillText('Have a lovely day ✦', width / 2, y);
 
       const blob = await getPngBlob(canvas, 'The browser could not create the slip image.');
