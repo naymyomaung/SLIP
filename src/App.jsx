@@ -7,52 +7,40 @@ import {
   Check,
   ChevronDown,
   Clock3,
-  CreditCard,
   FileText,
+  FileSpreadsheet,
   Grid2X2,
   History,
+  ImageDown,
   Minus,
   Plus,
   Printer,
   Search,
   ShoppingBag,
   ShoppingCart,
-  Smartphone,
+  Trash2,
   Wallet,
   X,
 } from 'lucide-react';
+import { createSalesWorkbook } from './excelReport.js';
 
 const STORAGE_KEY = 'slip-pos-data-v1';
 const CURRENCY = 'Ks';
-
-const initialProducts = [
-  { id: 'p-1', name: 'Iced milk tea', category: 'Drinks', price: 2500, color: 'peach', emoji: '🧋' },
-  { id: 'p-2', name: 'Cappuccino', category: 'Drinks', price: 3500, color: 'cream', emoji: '☕' },
-  { id: 'p-3', name: 'Fresh orange juice', category: 'Drinks', price: 3000, color: 'yellow', emoji: '🍊' },
-  { id: 'p-4', name: 'Butter croissant', category: 'Bakery', price: 2800, color: 'gold', emoji: '🥐' },
-  { id: 'p-5', name: 'Chocolate muffin', category: 'Bakery', price: 3200, color: 'lilac', emoji: '🧁' },
-  { id: 'p-6', name: 'Club sandwich', category: 'Food', price: 6500, color: 'green', emoji: '🥪' },
-  { id: 'p-7', name: 'Chicken salad', category: 'Food', price: 7200, color: 'blue', emoji: '🥗' },
-  { id: 'p-8', name: 'Chocolate cake', category: 'Dessert', price: 4500, color: 'pink', emoji: '🍰' },
-];
-
-const paymentOptions = [
-  { id: 'Cash', label: 'Cash', icon: Wallet },
-  { id: 'Card', label: 'Card', icon: CreditCard },
-  { id: 'Mobile pay', label: 'Mobile pay', icon: Smartphone },
-];
+const DEFAULT_PRODUCT_IDS = new Set(Array.from({ length: 8 }, (_, index) => `p-${index + 1}`));
 
 function loadSavedData() {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return { products: initialProducts, sales: [] };
+    if (!stored) return { products: [], sales: [] };
     const parsed = JSON.parse(stored);
     return {
-      products: Array.isArray(parsed.products) ? parsed.products : initialProducts,
+      products: Array.isArray(parsed.products)
+        ? parsed.products.filter((product) => !DEFAULT_PRODUCT_IDS.has(product.id))
+        : [],
       sales: Array.isArray(parsed.sales) ? parsed.sales : [],
     };
   } catch {
-    return { products: initialProducts, sales: [] };
+    return { products: [], sales: [] };
   }
 }
 
@@ -70,14 +58,73 @@ function formatDate(value, includeTime = true) {
   }).format(date);
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]);
+}
+
+function getSalesReportRows(sales) {
+  return [...sales].reverse().map((sale) => {
+    const items = Array.isArray(sale.items) ? sale.items : [];
+    return [
+      sale.id || '',
+      formatDate(sale.date),
+      sale.customerName || '—',
+      items.map((item) => `${item.quantity} × ${item.name}`).join(', '),
+      items.reduce((quantity, item) => quantity + Number(item.quantity || 0), 0),
+      formatMoney(sale.total),
+    ];
+  });
+}
+
+function wrapCanvasText(context, value, maxWidth) {
+  const words = String(value || '').split(/\s+/);
+  const lines = [];
+  let line = '';
+  words.forEach((word) => {
+    const nextLine = line ? `${line} ${word}` : word;
+    if (line && context.measureText(nextLine).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = nextLine;
+    }
+  });
+  if (line) lines.push(line);
+  return lines.length ? lines : [''];
+}
+
+function drawReceiptRule(context, y, width) {
+  context.save();
+  context.strokeStyle = '#a8b0aa';
+  context.setLineDash([5, 5]);
+  context.beginPath();
+  context.moveTo(48, y);
+  context.lineTo(width - 48, y);
+  context.stroke();
+  context.restore();
+}
+
+async function getPngBlob(canvas, errorMessage) {
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (blob) return blob;
+  const dataUrl = canvas.toDataURL('image/png');
+  const response = await fetch(dataUrl);
+  if (!response.ok) throw new Error(errorMessage);
+  return response.blob();
+}
+
 function App() {
   const [savedData, setSavedData] = useState(loadSavedData);
   const [page, setPage] = useState('sell');
   const [cart, setCart] = useState([]);
   const [category, setCategory] = useState('All items');
   const [query, setQuery] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState('Cash');
-  const [amountReceived, setAmountReceived] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [showProductForm, setShowProductForm] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
@@ -115,7 +162,6 @@ function App() {
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const itemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
-  const changeDue = Math.max(0, Number(amountReceived || 0) - subtotal);
   const visibleSales = useMemo(() => {
     const normalizedQuery = historyQuery.trim().toLowerCase();
     return [...savedData.sales]
@@ -151,24 +197,31 @@ function App() {
 
   function completeSale() {
     if (!cart.length) return;
-    if (paymentMethod === 'Cash' && Number(amountReceived) < subtotal) return;
     const sale = {
       id: `SL-${Date.now().toString().slice(-8)}`,
       date: new Date().toISOString(),
       customerName: customerName.trim(),
       items: cart.map(({ id, name, price, quantity }) => ({ id, name, price, quantity })),
       total: subtotal,
-      paymentMethod,
-      amountReceived: paymentMethod === 'Cash' ? Number(amountReceived) : subtotal,
-      change: paymentMethod === 'Cash' ? changeDue : 0,
     };
     setSavedData((current) => ({ ...current, sales: [...current.sales, sale] }));
     setCart([]);
-    setAmountReceived('');
     setCustomerName('');
     setShowCheckout(false);
     setSelectedSale(sale);
-    setNotice('Payment saved. Your receipt is ready to print.');
+    setNotice('Sale completed. Preparing your PNG slip…');
+    void downloadSaleSlip(sale);
+  }
+
+  function deleteSale(sale) {
+    const confirmed = window.confirm(`Delete receipt ${sale.id}? This cannot be undone.`);
+    if (!confirmed) return;
+    setSavedData((current) => ({
+      ...current,
+      sales: current.sales.filter((savedSale) => savedSale.id !== sale.id),
+    }));
+    if (selectedSale?.id === sale.id) setSelectedSale(null);
+    setNotice(`Receipt ${sale.id} deleted.`);
   }
 
   function addProduct(event) {
@@ -202,6 +255,236 @@ function App() {
     link.click();
     URL.revokeObjectURL(url);
     setNotice('Backup file downloaded.');
+  }
+
+  function exportSalesExcel() {
+    try {
+      const workbook = createSalesWorkbook(savedData.sales);
+      const url = URL.createObjectURL(new Blob([workbook], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `slip-sales-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setNotice('Excel sales report downloaded.');
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not export report: ${error.message}` : 'Could not export the Excel report.');
+    }
+  }
+
+  async function exportSalesImage() {
+    try {
+      const reportRows = getSalesReportRows(savedData.sales);
+      const columns = [
+        { label: 'RECEIPT', width: 170 },
+        { label: 'DATE', width: 205 },
+        { label: 'CUSTOMER', width: 220 },
+        { label: 'ITEMS', width: 430 },
+        { label: 'QTY', width: 90 },
+        { label: 'TOTAL', width: 170 },
+      ];
+      const width = columns.reduce((total, column) => total + column.width, 0) + 64;
+      const rowHeight = 56;
+      const height = 150 + (reportRows.length + 1) * rowHeight;
+      if (height > 30000) {
+        throw new Error('This history is too large for one image. Use Excel or print instead.');
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Image export is not supported by this browser.');
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.fillStyle = '#14221a';
+      context.font = '700 28px Arial, sans-serif';
+      context.fillText('Slip · Sales history', 32, 45);
+      context.fillStyle = '#728078';
+      context.font = '14px Arial, sans-serif';
+      context.fillText(`${reportRows.length} transactions · Generated ${formatDate(new Date())}`, 32, 72);
+
+      const tableTop = 100;
+      context.fillStyle = '#eff8f3';
+      context.fillRect(24, tableTop, width - 48, rowHeight);
+      let x = 40;
+      context.font = '700 12px Arial, sans-serif';
+      context.fillStyle = '#526158';
+      columns.forEach((column) => {
+        context.fillText(column.label, x, tableTop + 34);
+        x += column.width;
+      });
+
+      context.font = '14px Arial, sans-serif';
+      reportRows.forEach((row, rowIndex) => {
+        const y = tableTop + rowHeight * (rowIndex + 1);
+        if (rowIndex % 2 === 1) {
+          context.fillStyle = '#fafcfb';
+          context.fillRect(24, y, width - 48, rowHeight);
+        }
+        context.strokeStyle = '#e7ede9';
+        context.beginPath();
+        context.moveTo(24, y + rowHeight);
+        context.lineTo(width - 24, y + rowHeight);
+        context.stroke();
+        let cellX = 40;
+        row.forEach((value, columnIndex) => {
+          const maxWidth = columns[columnIndex].width - 18;
+          let displayValue = String(value);
+          while (displayValue.length && context.measureText(displayValue).width > maxWidth) {
+            displayValue = `${displayValue.slice(0, -2)}…`;
+          }
+          context.fillStyle = columnIndex === 5 ? '#17251c' : '#435148';
+          context.font = columnIndex === 5 ? '700 14px Arial, sans-serif' : '14px Arial, sans-serif';
+          context.fillText(displayValue, cellX, y + 34);
+          cellX += columns[columnIndex].width;
+        });
+      });
+
+      const blob = await getPngBlob(canvas, 'The browser could not create the image file.');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `slip-sales-${new Date().toISOString().slice(0, 10)}.png`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice('Sales history image downloaded.');
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not create image: ${error.message}` : 'Could not create the sales history image.');
+    }
+  }
+
+  async function downloadSaleSlip(sale) {
+    try {
+      const items = Array.isArray(sale.items) ? sale.items : [];
+      const width = 600;
+      const nameWidth = 340;
+      const textMeasure = document.createElement('canvas').getContext('2d');
+      if (!textMeasure) throw new Error('Image export is not supported by this browser.');
+      textMeasure.font = '18px "Courier New", monospace';
+      const itemLines = items.map((item) => wrapCanvasText(textMeasure, item.name, nameWidth));
+      const height = 430 + itemLines.reduce((total, lines) => total + Math.max(1, lines.length) * 24 + 52, 0);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Image export is not supported by this browser.');
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.textAlign = 'center';
+      context.fillStyle = '#14221a';
+      context.font = '800 46px Arial, sans-serif';
+      context.fillText('slip.', width / 2, 76);
+      context.fillStyle = '#66736b';
+      context.font = '16px Arial, sans-serif';
+      context.fillText('Thanks for stopping by!', width / 2, 108);
+      drawReceiptRule(context, 136, width);
+
+      context.textAlign = 'left';
+      context.fillStyle = '#5b665f';
+      context.font = '16px "Courier New", monospace';
+      let y = 172;
+      const metadata = [
+        ['Receipt', sale.id],
+        ['Date', formatDate(sale.date)],
+        ...(sale.customerName ? [['Customer', sale.customerName]] : []),
+      ];
+      metadata.forEach(([label, value]) => {
+        context.fillStyle = '#66736b';
+        context.fillText(label, 48, y);
+        context.fillStyle = '#17201c';
+        context.textAlign = 'right';
+        context.fillText(String(value), width - 48, y);
+        context.textAlign = 'left';
+        y += 30;
+      });
+
+      y += 4;
+      drawReceiptRule(context, y, width);
+      y += 34;
+      items.forEach((item, index) => {
+        const lines = itemLines[index];
+        context.fillStyle = '#17201c';
+        context.font = '18px "Courier New", monospace';
+        lines.forEach((line) => {
+          context.textAlign = 'left';
+          context.fillText(line, 48, y);
+          y += 24;
+        });
+        context.fillStyle = '#66736b';
+        context.font = '15px "Courier New", monospace';
+        context.textAlign = 'left';
+        context.fillText(`${item.quantity} × ${formatMoney(item.price)}`, 48, y);
+        context.fillStyle = '#17201c';
+        context.textAlign = 'right';
+        context.fillText(formatMoney(Number(item.quantity) * Number(item.price)), width - 48, y);
+        context.textAlign = 'left';
+        y += 35;
+        if (index < items.length - 1) {
+          drawReceiptRule(context, y - 10, width);
+        }
+      });
+
+      drawReceiptRule(context, y, width);
+      y += 34;
+      context.fillStyle = '#66736b';
+      context.font = '17px "Courier New", monospace';
+      context.textAlign = 'left';
+      context.fillText('Subtotal', 48, y);
+      context.textAlign = 'right';
+      context.fillText(formatMoney(sale.total), width - 48, y);
+      y += 38;
+      context.fillStyle = '#17201c';
+      context.font = 'bold 23px "Courier New", monospace';
+      context.textAlign = 'left';
+      context.fillText('TOTAL', 48, y);
+      context.textAlign = 'right';
+      context.fillText(formatMoney(sale.total), width - 48, y);
+      y += 45;
+      context.textAlign = 'center';
+      context.fillStyle = '#66736b';
+      context.font = '16px Arial, sans-serif';
+      context.fillText('Have a lovely day ✦', width / 2, y);
+
+      const blob = await getPngBlob(canvas, 'The browser could not create the slip image.');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `slip-${String(sale.id || 'receipt').replace(/[^a-zA-Z0-9_-]/g, '-')}.png`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`Image slip for ${sale.id} downloaded.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not create slip image: ${error.message}` : 'Could not create the slip image.');
+    }
+  }
+
+  function printSalesReport() {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      setNotice('The print window was blocked. Allow pop-ups and try again.');
+      return;
+    }
+    const reportRows = getSalesReportRows(savedData.sales);
+    const tableRows = reportRows.map((row) => (
+      `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`
+    )).join('');
+    const headers = ['Receipt', 'Date', 'Customer', 'Items', 'Qty', 'Total'];
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Slip sales history</title><style>
+      *{box-sizing:border-box}body{margin:28px;color:#17201c;font:12px Arial,sans-serif}
+      h1{margin:0 0 6px;font-size:22px}p{margin:0 0 20px;color:#647168}
+      table{width:100%;border-collapse:collapse}th,td{padding:9px 8px;border-bottom:1px solid #e3e9e5;text-align:left;vertical-align:top}
+      th{background:#eff8f3;color:#526158;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+      tr{break-inside:avoid}td:nth-child(4){max-width:280px;overflow-wrap:anywhere}td:last-child{white-space:nowrap;font-weight:700}
+      @media print{body{margin:10mm}thead{display:table-header-group}}
+    </style></head><body><h1>Slip · Sales history</h1><p>${reportRows.length} transactions · Generated ${escapeHtml(formatDate(new Date()))}</p><table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${tableRows}</tbody></table><script>window.onload=()=>window.print();</script></body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
   }
 
   async function importBackup(event) {
@@ -297,7 +580,7 @@ function App() {
                   </button>
                 </div>
                 <div className="mb-5 flex gap-2 overflow-x-auto pb-1">
-                  {categories.map((item) => (
+                  {categories.filter((item) => item !== 'All items').map((item) => (
                     <button key={item} onClick={() => setCategory(item)} className={`category-chip ${category === item ? 'category-chip-active' : ''}`}>{item}</button>
                   ))}
                 </div>
@@ -318,7 +601,7 @@ function App() {
                     ))}
                   </div>
                 ) : (
-                  <div className="empty-panel"><Search size={22} /><p className="mt-2 font-semibold">No items found</p><p className="mt-1 text-sm">Try another search or add a new item.</p></div>
+                  <div className="empty-panel"><Search size={22} /><p className="mt-2 font-semibold">No items found</p><p className="mt-1 text-sm">Try another search or add a new item.</p><button className="secondary-button mt-4" onClick={() => setShowProductForm(true)}><Plus size={15} /> Add item</button></div>
                 )}
               </section>
 
@@ -372,7 +655,7 @@ function App() {
                 <div className="border-t border-slate-100 px-5 pb-5 pt-4">
                   <div className="flex justify-between text-sm text-slate-500"><span>Subtotal</span><span>{formatMoney(subtotal)}</span></div>
                   <div className="mt-3 flex justify-between border-t border-dashed border-slate-200 pt-3.5"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold">{formatMoney(subtotal)}</span></div>
-                  <button className="primary-button mt-4 w-full" disabled={!cart.length} onClick={() => { setAmountReceived(subtotal ? String(subtotal) : ''); setCustomerName(''); setShowCheckout(true); }}>
+                  <button className="primary-button mt-4 w-full" disabled={!cart.length} onClick={() => { setCustomerName(''); setShowCheckout(true); }}>
                     <span>Continue to payment</span><span className="flex items-center gap-2">{formatMoney(subtotal)} <span aria-hidden="true">→</span></span>
                   </button>
                   <p className="mt-3 flex items-center justify-center gap-1.5 text-[11px] text-slate-400"><Check size={12} /> Securely saved on this device</p>
@@ -381,9 +664,14 @@ function App() {
             </div>
           ) : (
             <section className="p-4 sm:p-6 lg:p-9">
-              <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+              <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                 <div><p className="eyebrow">YOUR BUSINESS</p><h1 className="mt-1 text-3xl font-bold tracking-tight">Sales history</h1><p className="mt-1 text-sm text-slate-500">A complete record of your payments and receipts.</p></div>
-                <label className="search-box w-full sm:w-72"><Search size={17} className="text-slate-400" /><input value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search receipts..." aria-label="Search sales history" /></label>
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                  <button className="secondary-button w-full sm:w-auto" onClick={exportSalesExcel}><FileSpreadsheet size={16} /> Excel report</button>
+                  <button className="secondary-button w-full sm:w-auto" onClick={printSalesReport}><Printer size={16} /> Print report</button>
+                  <button className="secondary-button w-full sm:w-auto" onClick={exportSalesImage}><ImageDown size={16} /> Download image</button>
+                  <label className="search-box w-full sm:w-72"><Search size={17} className="text-slate-400" /><input value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search receipts..." aria-label="Search sales history" /></label>
+                </div>
               </div>
               <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <StatCard label="Total sales" value={formatMoney(savedData.sales.reduce((sum, sale) => sum + sale.total, 0))} icon={Wallet} />
@@ -391,19 +679,23 @@ function App() {
                 <StatCard label="Items in catalog" value={savedData.products.length.toLocaleString()} icon={ShoppingBag} />
               </div>
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                <div className="hidden grid-cols-[1.2fr_1.2fr_1fr_0.8fr_0.7fr] gap-4 border-b border-slate-100 bg-slate-50/70 px-5 py-3 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400 md:grid">
+                <div className="hidden grid-cols-[1.1fr_1.1fr_0.8fr_0.7fr_1.2fr] gap-4 border-b border-slate-100 bg-slate-50/70 px-5 py-3 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400 md:grid">
                   <span>Receipt</span><span>Date</span><span>Payment</span><span>Total</span><span className="text-right">Slip</span>
                 </div>
                 {visibleSales.length ? visibleSales.map((sale) => (
-                  <div key={sale.id} className="sale-row grid gap-3 border-b border-slate-100 px-5 py-4 last:border-0 md:grid-cols-[1.2fr_1.2fr_1fr_0.8fr_0.7fr] md:items-center md:gap-4">
+                  <div key={sale.id} className="sale-row grid gap-3 border-b border-slate-100 px-5 py-4 last:border-0 md:grid-cols-[1.1fr_1.1fr_0.8fr_0.7fr_1.2fr] md:items-center md:gap-4">
                     <div className="sale-receipt flex items-center gap-3">
                       <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#effaf5] text-emerald-700"><FileText size={16} /></div>
                         <div><p className="text-sm font-semibold">{sale.id}</p><p className="mt-0.5 text-xs text-slate-500">{sale.customerName || `${sale.items.length} ${sale.items.length === 1 ? 'item' : 'items'}`}</p></div>
                     </div>
                     <div className="sale-date flex items-center gap-1.5 text-xs text-slate-600"><Clock3 size={14} className="text-slate-400" /><span>{formatDate(sale.date)}</span></div>
-                    <span className="sale-payment w-fit rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">{sale.paymentMethod}</span>
+                    <span className="sale-payment w-fit rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">{sale.paymentMethod || '—'}</span>
                     <span className="sale-total text-sm font-semibold">{formatMoney(sale.total)}</span>
-                    <button className="sale-slip receipt-button" onClick={() => printSlip(sale)}><Printer size={14} /> Print slip</button>
+                    <div className="sale-slip">
+                      <button className="receipt-button" onClick={() => printSlip(sale)} aria-label={`Print slip ${sale.id}`}><Printer size={14} /><span>Print</span></button>
+                      <button className="receipt-button" onClick={() => downloadSaleSlip(sale)} aria-label={`Download image slip ${sale.id}`}><ImageDown size={14} /><span>Image</span></button>
+                      <button className="receipt-button delete-sale-button" onClick={() => deleteSale(sale)} aria-label={`Delete receipt ${sale.id}`} title="Delete receipt"><Trash2 size={14} /><span>Delete</span></button>
+                    </div>
                   </div>
                 )) : (
                   <div className="flex flex-col items-center px-5 py-16 text-center">
@@ -421,7 +713,7 @@ function App() {
       </div>
 
       {showCheckout && (
-        <Modal onClose={() => setShowCheckout(false)} title="Take payment" subtitle="Choose a payment method to complete this sale.">
+        <Modal onClose={() => setShowCheckout(false)} title="Complete sale" subtitle="Add a customer name if you want it on the receipt.">
           <div className="mb-5 rounded-xl bg-slate-50 p-4">
             <p className="text-xs font-medium text-slate-500">Amount due</p>
             <p className="mt-1 text-2xl font-bold tracking-tight">{formatMoney(subtotal)}</p>
@@ -429,25 +721,11 @@ function App() {
           <FormField label="Customer name (optional)">
             <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} maxLength="80" placeholder="Enter customer name" />
           </FormField>
-          <p className="mb-2 text-xs font-semibold text-slate-600">Payment method</p>
-          <div className="grid grid-cols-3 gap-2">
-            {paymentOptions.map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => setPaymentMethod(id)} className={`payment-choice ${paymentMethod === id ? 'payment-choice-active' : ''}`}><Icon size={17} /><span>{label}</span></button>
-            ))}
-          </div>
-          {paymentMethod === 'Cash' && (
-            <div className="mt-5">
-              <label className="mb-2 block text-xs font-semibold text-slate-600" htmlFor="amount-received">Cash received</label>
-              <div className="search-box"><span className="text-sm font-medium text-slate-400">{CURRENCY}</span><input id="amount-received" type="number" min={subtotal} value={amountReceived} onChange={(event) => setAmountReceived(event.target.value)} placeholder="Enter amount received" /></div>
-              <div className="mt-3 flex items-center justify-between text-sm"><span className="text-slate-500">Change due</span><span className="font-semibold">{formatMoney(changeDue)}</span></div>
-              {Number(amountReceived) < subtotal && <p className="mt-2 text-xs text-rose-600">Amount received must cover the total.</p>}
-            </div>
-          )}
           <div className="mt-6 flex gap-2">
             <button className="secondary-button flex-1 justify-center" onClick={() => setShowCheckout(false)}>Cancel</button>
-            <button className="primary-button flex-[1.5] justify-center" disabled={paymentMethod === 'Cash' && Number(amountReceived) < subtotal} onClick={completeSale}><Check size={16} /> Complete payment</button>
+            <button className="primary-button flex-[1.5] justify-center" onClick={completeSale}><Check size={16} /> Complete sale</button>
           </div>
-          <p className="mt-4 text-center text-[11px] leading-4 text-slate-400">This records the payment in Slip. Card and mobile payments must be collected separately.</p>
+          <p className="mt-4 text-center text-[11px] leading-4 text-slate-400">This saves the sale in Slip. Collect payment separately.</p>
         </Modal>
       )}
 
@@ -465,7 +743,7 @@ function App() {
         </Modal>
       )}
 
-      {selectedSale && <PrintableReceipt sale={selectedSale} onClose={() => setSelectedSale(null)} />}
+      {selectedSale && <PrintableReceipt sale={selectedSale} onClose={() => setSelectedSale(null)} onDownloadImage={downloadSaleSlip} />}
       {notice && <div className="toast" role="status"><Check size={16} />{notice}</div>}
     </div>
   );
@@ -512,12 +790,15 @@ function FormField({ label, children }) {
   return <label className="form-field"><span>{label}</span>{children}</label>;
 }
 
-function PrintableReceipt({ sale, onClose }) {
+function PrintableReceipt({ sale, onClose, onDownloadImage }) {
   return <>
     <div className="receipt-preview-backdrop no-print" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="receipt-preview">
         <div className="mb-4 flex items-center justify-between"><div><p className="font-bold">Receipt ready</p><p className="mt-1 text-xs text-slate-500">{sale.id}</p></div><button className="icon-button" onClick={onClose} aria-label="Close receipt"><X size={16} /></button></div>
-        <button className="primary-button w-full justify-center" onClick={() => window.print()}><Printer size={16} /> Print receipt</button>
+        <div className="flex gap-2">
+          <button className="secondary-button flex-1 justify-center" onClick={() => onDownloadImage(sale)}><ImageDown size={15} /> Download PNG</button>
+          <button className="primary-button flex-1 justify-center" onClick={() => window.print()}><Printer size={15} /> Print</button>
+        </div>
       </div>
     </div>
     <div className="print-receipt">
@@ -532,7 +813,7 @@ function PrintableReceipt({ sale, onClose }) {
       <div className="receipt-divider" />
       <div className="receipt-meta"><span>Subtotal</span><strong>{formatMoney(sale.total)}</strong></div>
       <div className="receipt-meta receipt-total"><span>Total</span><strong>{formatMoney(sale.total)}</strong></div>
-      <div className="receipt-meta"><span>Payment</span><strong>{sale.paymentMethod}</strong></div>
+      {sale.paymentMethod && <div className="receipt-meta"><span>Payment</span><strong>{sale.paymentMethod}</strong></div>}
       {sale.paymentMethod === 'Cash' && <>
         <div className="receipt-meta"><span>Cash received</span><strong>{formatMoney(sale.amountReceived)}</strong></div>
         <div className="receipt-meta"><span>Change</span><strong>{formatMoney(sale.change)}</strong></div>

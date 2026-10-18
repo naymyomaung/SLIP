@@ -9,13 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
     "@tailwindcss/vite": "latest",
+    "@vitejs/plugin-react": "latest",
+    "fflate": "^0.8.3",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
     "tailwindcss": "latest",
     "vite": "latest"
-  },
-  "devDependencies": {}
+  }
 }

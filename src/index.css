@@ -50,6 +50,8 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(22, 163, 106
 .quantity-button:hover { border-color: #a7d8bb; color: #148351; }
 .receipt-button { display: flex; align-items: center; justify-self: end; gap: 6px; border: 1px solid #e5e9e6; border-radius: 8px; padding: 7px 9px; background: white; color: #45524a; font-size: 11px; font-weight: 600; }
 .receipt-button:hover { border-color: #9bd4b5; color: #138454; }
+.sale-slip { display: flex; justify-self: end; gap: 7px; }
+.delete-sale-button:hover { border-color: #fecaca; color: #be123c; }
 .empty-panel { display: flex; min-height: 260px; flex-direction: column; align-items: center; justify-content: center; color: #a0aaa4; text-align: center; }
 .payment-choice { display: flex; min-height: 68px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid #e5e9e6; border-radius: 11px; background: white; color: #66736b; font-size: 10px; font-weight: 600; }
 .payment-choice-active { border-color: #159861; background: #f0faf5; color: #128153; box-shadow: inset 0 0 0 1px #159861; }
@@ -113,7 +115,8 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(22, 163, 106
   .sale-date { grid-area: date; min-width: 0; font-size: 10px; }
   .sale-payment { grid-area: payment; justify-self: end; }
   .sale-total { grid-area: total; justify-self: end; white-space: nowrap; }
-  .sale-slip { grid-area: slip; justify-self: stretch; justify-content: center; min-height: 38px; }
+  .sale-slip { grid-area: slip; justify-self: stretch; }
+  .sale-slip .receipt-button { min-height: 38px; flex: 1; justify-content: center; }
 }
 
 @media (max-width: 420px) {
